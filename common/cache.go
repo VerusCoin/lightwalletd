@@ -221,53 +221,58 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 		Log.Fatal("cache.Add height going backwards: ", height)
 		return nil
 	}
-	bheight := int(block.Height)
 
-	if bheight != height {
-		// This could only happen if zcashd returned the wrong
-		// block (not the height we requested).
-		Log.Fatal("cache.Add wrong height: ", bheight, " expecting: ", height)
+	if int(block.Height) != height {
+		Log.Fatal("cache.Add wrong height: ", block.Height, " expecting: ", height)
 		return nil
 	}
 
-	// Add the new block and its length to the db files.
-	data, err := proto.Marshal(block)
-	if err != nil {
-		return err
-	}
-	checkSummed := checksum(height, data)
-	checkSummed = append(checkSummed, data...)
-	err = c.storeNewBlock(height, checkSummed)
-	if err != nil {
-		Log.Fatal("hash write at height", height, "failed: ", err)
-	}
-	err = c.storeNewHeight(false)
-
-	if err != nil {
-		Log.Fatal("height write with height", height, "failed: ", err)
-	}
-
-	if c.latestHash == nil {
-		c.latestHash = make([]byte, len(block.Hash))
-	}
-	copy(c.latestHash, block.Hash)
-
-
-	var prevSize uint64 = 0
+	prevSize := uint64(0)
 	if height > c.firstBlock {
 		prevSize = c.getSaplingTreeSize(height - 1)
 	}
 
-	blockSize := uint64(0)
+	var blockSize uint64
 	for _, tx := range block.Vtx {
 		blockSize += uint64(len(tx.Outputs))
 	}
 
 	newSize := prevSize + blockSize
 
-	if err := c.storeSaplingTreeSize(height, newSize); err != nil {
-		Log.Fatal("failed to store sapling tree size: ", err)
+	block.SaplingCommitmentTreeSize = newSize
+
+	if height > c.firstBlock {
+    		prevSize := c.getSaplingTreeSize(height - 1)
+   		if newSize < prevSize {
+                        // should always increase or stay the same on inter-block basis
+        		Log.Fatal("sapling tree size decreased at height ", height)
+    		}
 	}
+
+	if err := c.storeSaplingTreeSize(height, newSize); err != nil {
+		Log.Fatal("failed to store sapling tree size at height ", height, ": ", err)
+	}
+
+	data, err := proto.Marshal(block)
+	if err != nil {
+		return err
+	}
+
+	checkSummed := checksum(height, data)
+	checkSummed = append(checkSummed, data...)
+
+	if err := c.storeNewBlock(height, checkSummed); err != nil {
+		Log.Fatal("hash write failed at height", height, ": ", err)
+	}
+
+	if err := c.storeNewHeight(false); err != nil {
+		Log.Fatal("height write failed at height", height, ": ", err)
+	}
+
+	if c.latestHash == nil {
+		c.latestHash = make([]byte, len(block.Hash))
+	}
+	copy(c.latestHash, block.Hash)
 
 	c.nextBlock++
 	// Invariant: m[firstBlock..nextBlock) are valid.
