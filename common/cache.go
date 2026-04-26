@@ -239,7 +239,9 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 
 	newSize := prevSize + blockSize
 
-	block.SaplingCommitmentTreeSize = newSize
+	block.ChainMetadata = &walletrpc.ChainMetadata{
+		SaplingCommitmentTreeSize: &newSize,
+	}
 
 	if height > c.firstBlock {
     		prevSize := c.getSaplingTreeSize(height - 1)

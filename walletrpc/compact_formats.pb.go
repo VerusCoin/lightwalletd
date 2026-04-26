@@ -24,6 +24,54 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Information about the state of the chain as of a given block.
+type ChainMetadata struct {
+	state         protoimpl.MessageState
+	sizeCache     protoimpl.SizeCache
+	unknownFields protoimpl.UnknownFields
+
+	SaplingCommitmentTreeSize *uint64 `protobuf:"varint,1,opt,name=saplingCommitmentTreeSize,proto3,oneof" json:"saplingCommitmentTreeSize,omitempty"` // the size of the Sapling note commitment tree as of the end of this block
+}
+
+func (x *ChainMetadata) Reset() {
+	*x = ChainMetadata{}
+	if protoimpl.UnsafeEnabled {
+		mi := &file_compact_formats_proto_msgTypes[0]
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		ms.StoreMessageInfo(mi)
+	}
+}
+
+func (x *ChainMetadata) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ChainMetadata) ProtoMessage() {}
+
+func (x *ChainMetadata) ProtoReflect() protoreflect.Message {
+	mi := &file_compact_formats_proto_msgTypes[0]
+	if protoimpl.UnsafeEnabled && x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ChainMetadata.ProtoReflect.Descriptor instead.
+func (*ChainMetadata) Descriptor() ([]byte, []int) {
+	return file_compact_formats_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *ChainMetadata) GetSaplingCommitmentTreeSize() uint64 {
+	if x != nil && x.SaplingCommitmentTreeSize != nil {
+		return *x.SaplingCommitmentTreeSize
+	}
+	return 0
+}
+
 // CompactBlock is a packaging of ONLY the data from a block that's needed to:
 //  1. Detect a payment to your shielded Sapling address
 //  2. Detect a spend of your shielded Sapling notes
@@ -33,20 +81,20 @@ type CompactBlock struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	ProtoVersion              uint32       `protobuf:"varint,1,opt,name=protoVersion,proto3" json:"protoVersion,omitempty"`
-	Height                    uint64       `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
-	Hash                      []byte       `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
-	PrevHash                  []byte       `protobuf:"bytes,4,opt,name=prevHash,proto3" json:"prevHash,omitempty"`
-	Time                      uint32       `protobuf:"varint,5,opt,name=time,proto3" json:"time,omitempty"`
-	Header                    []byte       `protobuf:"bytes,6,opt,name=header,proto3" json:"header,omitempty"`
-	Vtx                       []*CompactTx `protobuf:"bytes,7,rep,name=vtx,proto3" json:"vtx,omitempty"`
-	SaplingCommitmentTreeSize uint64       `protobuf:"varint,8,opt,name=saplingCommitmentTreeSize,proto3" json:"saplingCommitmentTreeSize,omitempty"`
+	ProtoVersion  uint32         `protobuf:"varint,1,opt,name=protoVersion,proto3" json:"protoVersion,omitempty"`
+	Height        uint64         `protobuf:"varint,2,opt,name=height,proto3" json:"height,omitempty"`
+	Hash          []byte         `protobuf:"bytes,3,opt,name=hash,proto3" json:"hash,omitempty"`
+	PrevHash      []byte         `protobuf:"bytes,4,opt,name=prevHash,proto3" json:"prevHash,omitempty"`
+	Time          uint32         `protobuf:"varint,5,opt,name=time,proto3" json:"time,omitempty"`
+	Header        []byte         `protobuf:"bytes,6,opt,name=header,proto3" json:"header,omitempty"`
+	Vtx           []*CompactTx   `protobuf:"bytes,7,rep,name=vtx,proto3" json:"vtx,omitempty"`
+	ChainMetadata *ChainMetadata `protobuf:"bytes,8,opt,name=chainMetadata,proto3" json:"chainMetadata,omitempty"`
 }
 
 func (x *CompactBlock) Reset() {
 	*x = CompactBlock{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_compact_formats_proto_msgTypes[0]
+		mi := &file_compact_formats_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -59,7 +107,7 @@ func (x *CompactBlock) String() string {
 func (*CompactBlock) ProtoMessage() {}
 
 func (x *CompactBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_compact_formats_proto_msgTypes[0]
+	mi := &file_compact_formats_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -72,7 +120,7 @@ func (x *CompactBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactBlock.ProtoReflect.Descriptor instead.
 func (*CompactBlock) Descriptor() ([]byte, []int) {
-	return file_compact_formats_proto_rawDescGZIP(), []int{0}
+	return file_compact_formats_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CompactBlock) GetProtoVersion() uint32 {
@@ -124,11 +172,11 @@ func (x *CompactBlock) GetVtx() []*CompactTx {
 	return nil
 }
 
-func (x *CompactBlock) GetSaplingCommitmentTreeSize() uint64 {
+func (x *CompactBlock) GetChainMetadata() *ChainMetadata {
 	if x != nil {
-		return x.SaplingCommitmentTreeSize
+		return x.ChainMetadata
 	}
-	return 0
+	return nil
 }
 
 // CompactTx contains the minimum information for a wallet to know if this transaction
@@ -155,7 +203,7 @@ type CompactTx struct {
 func (x *CompactTx) Reset() {
 	*x = CompactTx{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_compact_formats_proto_msgTypes[1]
+		mi := &file_compact_formats_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -168,7 +216,7 @@ func (x *CompactTx) String() string {
 func (*CompactTx) ProtoMessage() {}
 
 func (x *CompactTx) ProtoReflect() protoreflect.Message {
-	mi := &file_compact_formats_proto_msgTypes[1]
+	mi := &file_compact_formats_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -181,7 +229,7 @@ func (x *CompactTx) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactTx.ProtoReflect.Descriptor instead.
 func (*CompactTx) Descriptor() ([]byte, []int) {
-	return file_compact_formats_proto_rawDescGZIP(), []int{1}
+	return file_compact_formats_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CompactTx) GetIndex() uint64 {
@@ -232,7 +280,7 @@ type CompactSpend struct {
 func (x *CompactSpend) Reset() {
 	*x = CompactSpend{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_compact_formats_proto_msgTypes[2]
+		mi := &file_compact_formats_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -245,7 +293,7 @@ func (x *CompactSpend) String() string {
 func (*CompactSpend) ProtoMessage() {}
 
 func (x *CompactSpend) ProtoReflect() protoreflect.Message {
-	mi := &file_compact_formats_proto_msgTypes[2]
+	mi := &file_compact_formats_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -258,7 +306,7 @@ func (x *CompactSpend) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactSpend.ProtoReflect.Descriptor instead.
 func (*CompactSpend) Descriptor() ([]byte, []int) {
-	return file_compact_formats_proto_rawDescGZIP(), []int{2}
+	return file_compact_formats_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CompactSpend) GetNf() []byte {
@@ -283,7 +331,7 @@ type CompactOutput struct {
 func (x *CompactOutput) Reset() {
 	*x = CompactOutput{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_compact_formats_proto_msgTypes[3]
+		mi := &file_compact_formats_proto_msgTypes[4]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -296,7 +344,7 @@ func (x *CompactOutput) String() string {
 func (*CompactOutput) ProtoMessage() {}
 
 func (x *CompactOutput) ProtoReflect() protoreflect.Message {
-	mi := &file_compact_formats_proto_msgTypes[3]
+	mi := &file_compact_formats_proto_msgTypes[4]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -309,7 +357,7 @@ func (x *CompactOutput) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CompactOutput.ProtoReflect.Descriptor instead.
 func (*CompactOutput) Descriptor() ([]byte, []int) {
-	return file_compact_formats_proto_rawDescGZIP(), []int{3}
+	return file_compact_formats_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *CompactOutput) GetCmu() []byte {
@@ -338,25 +386,33 @@ var File_compact_formats_proto protoreflect.FileDescriptor
 var file_compact_formats_proto_rawDesc = []byte{
 	0x0a, 0x15, 0x63, 0x6f, 0x6d, 0x70, 0x61, 0x63, 0x74, 0x5f, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74,
 	0x73, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x15, 0x63, 0x61, 0x73, 0x68, 0x2e, 0x7a, 0x2e,
-	0x77, 0x61, 0x6c, 0x6c, 0x65, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x72, 0x70, 0x63, 0x22, 0x98,
-	0x02, 0x0a, 0x0c, 0x43, 0x6f, 0x6d, 0x70, 0x61, 0x63, 0x74, 0x42, 0x6c, 0x6f, 0x63, 0x6b, 0x12,
-	0x22, 0x0a, 0x0c, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x0c, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x56, 0x65, 0x72, 0x73,
-	0x69, 0x6f, 0x6e, 0x12, 0x16, 0x0a, 0x06, 0x68, 0x65, 0x69, 0x67, 0x68, 0x74, 0x18, 0x02, 0x20,
-	0x01, 0x28, 0x04, 0x52, 0x06, 0x68, 0x65, 0x69, 0x67, 0x68, 0x74, 0x12, 0x12, 0x0a, 0x04, 0x68,
-	0x61, 0x73, 0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x68, 0x61, 0x73, 0x68, 0x12,
-	0x1a, 0x0a, 0x08, 0x70, 0x72, 0x65, 0x76, 0x48, 0x61, 0x73, 0x68, 0x18, 0x04, 0x20, 0x01, 0x28,
-	0x0c, 0x52, 0x08, 0x70, 0x72, 0x65, 0x76, 0x48, 0x61, 0x73, 0x68, 0x12, 0x12, 0x0a, 0x04, 0x74,
-	0x69, 0x6d, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x74, 0x69, 0x6d, 0x65, 0x12,
-	0x16, 0x0a, 0x06, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72, 0x18, 0x06, 0x20, 0x01, 0x28, 0x0c, 0x52,
-	0x06, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72, 0x12, 0x32, 0x0a, 0x03, 0x76, 0x74, 0x78, 0x18, 0x07,
-	0x20, 0x03, 0x28, 0x0b, 0x32, 0x20, 0x2e, 0x63, 0x61, 0x73, 0x68, 0x2e, 0x7a, 0x2e, 0x77, 0x61,
-	0x6c, 0x6c, 0x65, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x43, 0x6f, 0x6d,
-	0x70, 0x61, 0x63, 0x74, 0x54, 0x78, 0x52, 0x03, 0x76, 0x74, 0x78, 0x12, 0x3c, 0x0a, 0x19, 0x73,
-	0x61, 0x70, 0x6c, 0x69, 0x6e, 0x67, 0x43, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x6d, 0x65, 0x6e, 0x74,
-	0x54, 0x72, 0x65, 0x65, 0x53, 0x69, 0x7a, 0x65, 0x18, 0x08, 0x20, 0x01, 0x28, 0x04, 0x52, 0x19,
-	0x73, 0x61, 0x70, 0x6c, 0x69, 0x6e, 0x67, 0x43, 0x6f, 0x6d, 0x6d, 0x69, 0x74, 0x6d, 0x65, 0x6e,
-	0x74, 0x54, 0x72, 0x65, 0x65, 0x53, 0x69, 0x7a, 0x65, 0x22, 0xc4, 0x01, 0x0a, 0x09, 0x43, 0x6f,
+	0x77, 0x61, 0x6c, 0x6c, 0x65, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x72, 0x70, 0x63, 0x22, 0x70,
+	0x0a, 0x0d, 0x43, 0x68, 0x61, 0x69, 0x6e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x12,
+	0x41, 0x0a, 0x19, 0x73, 0x61, 0x70, 0x6c, 0x69, 0x6e, 0x67, 0x43, 0x6f, 0x6d, 0x6d, 0x69, 0x74,
+	0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x65, 0x65, 0x53, 0x69, 0x7a, 0x65, 0x18, 0x01, 0x20, 0x01,
+	0x28, 0x04, 0x48, 0x00, 0x52, 0x19, 0x73, 0x61, 0x70, 0x6c, 0x69, 0x6e, 0x67, 0x43, 0x6f, 0x6d,
+	0x6d, 0x69, 0x74, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x65, 0x65, 0x53, 0x69, 0x7a, 0x65, 0x88,
+	0x01, 0x01, 0x42, 0x1c, 0x0a, 0x1a, 0x5f, 0x73, 0x61, 0x70, 0x6c, 0x69, 0x6e, 0x67, 0x43, 0x6f,
+	0x6d, 0x6d, 0x69, 0x74, 0x6d, 0x65, 0x6e, 0x74, 0x54, 0x72, 0x65, 0x65, 0x53, 0x69, 0x7a, 0x65,
+	0x22, 0xa6, 0x02, 0x0a, 0x0c, 0x43, 0x6f, 0x6d, 0x70, 0x61, 0x63, 0x74, 0x42, 0x6c, 0x6f, 0x63,
+	0x6b, 0x12, 0x22, 0x0a, 0x0c, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x56, 0x65, 0x72, 0x73, 0x69, 0x6f,
+	0x6e, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x0c, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x56, 0x65,
+	0x72, 0x73, 0x69, 0x6f, 0x6e, 0x12, 0x16, 0x0a, 0x06, 0x68, 0x65, 0x69, 0x67, 0x68, 0x74, 0x18,
+	0x02, 0x20, 0x01, 0x28, 0x04, 0x52, 0x06, 0x68, 0x65, 0x69, 0x67, 0x68, 0x74, 0x12, 0x12, 0x0a,
+	0x04, 0x68, 0x61, 0x73, 0x68, 0x18, 0x03, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x68, 0x61, 0x73,
+	0x68, 0x12, 0x1a, 0x0a, 0x08, 0x70, 0x72, 0x65, 0x76, 0x48, 0x61, 0x73, 0x68, 0x18, 0x04, 0x20,
+	0x01, 0x28, 0x0c, 0x52, 0x08, 0x70, 0x72, 0x65, 0x76, 0x48, 0x61, 0x73, 0x68, 0x12, 0x12, 0x0a,
+	0x04, 0x74, 0x69, 0x6d, 0x65, 0x18, 0x05, 0x20, 0x01, 0x28, 0x0d, 0x52, 0x04, 0x74, 0x69, 0x6d,
+	0x65, 0x12, 0x16, 0x0a, 0x06, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72, 0x18, 0x06, 0x20, 0x01, 0x28,
+	0x0c, 0x52, 0x06, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72, 0x12, 0x32, 0x0a, 0x03, 0x76, 0x74, 0x78,
+	0x18, 0x07, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x20, 0x2e, 0x63, 0x61, 0x73, 0x68, 0x2e, 0x7a, 0x2e,
+	0x77, 0x61, 0x6c, 0x6c, 0x65, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x43,
+	0x6f, 0x6d, 0x70, 0x61, 0x63, 0x74, 0x54, 0x78, 0x52, 0x03, 0x76, 0x74, 0x78, 0x12, 0x4a, 0x0a,
+	0x0d, 0x63, 0x68, 0x61, 0x69, 0x6e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x18, 0x08,
+	0x20, 0x01, 0x28, 0x0b, 0x32, 0x24, 0x2e, 0x63, 0x61, 0x73, 0x68, 0x2e, 0x7a, 0x2e, 0x77, 0x61,
+	0x6c, 0x6c, 0x65, 0x74, 0x2e, 0x73, 0x64, 0x6b, 0x2e, 0x72, 0x70, 0x63, 0x2e, 0x43, 0x68, 0x61,
+	0x69, 0x6e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x52, 0x0d, 0x63, 0x68, 0x61, 0x69,
+	0x6e, 0x4d, 0x65, 0x74, 0x61, 0x64, 0x61, 0x74, 0x61, 0x22, 0xc4, 0x01, 0x0a, 0x09, 0x43, 0x6f,
 	0x6d, 0x70, 0x61, 0x63, 0x74, 0x54, 0x78, 0x12, 0x14, 0x0a, 0x05, 0x69, 0x6e, 0x64, 0x65, 0x78,
 	0x18, 0x01, 0x20, 0x01, 0x28, 0x04, 0x52, 0x05, 0x69, 0x6e, 0x64, 0x65, 0x78, 0x12, 0x12, 0x0a,
 	0x04, 0x68, 0x61, 0x73, 0x68, 0x18, 0x02, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04, 0x68, 0x61, 0x73,
@@ -393,22 +449,24 @@ func file_compact_formats_proto_rawDescGZIP() []byte {
 	return file_compact_formats_proto_rawDescData
 }
 
-var file_compact_formats_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_compact_formats_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_compact_formats_proto_goTypes = []interface{}{
-	(*CompactBlock)(nil),  // 0: cash.z.wallet.sdk.rpc.CompactBlock
-	(*CompactTx)(nil),     // 1: cash.z.wallet.sdk.rpc.CompactTx
-	(*CompactSpend)(nil),  // 2: cash.z.wallet.sdk.rpc.CompactSpend
-	(*CompactOutput)(nil), // 3: cash.z.wallet.sdk.rpc.CompactOutput
+	(*ChainMetadata)(nil), // 0: cash.z.wallet.sdk.rpc.ChainMetadata
+	(*CompactBlock)(nil),  // 1: cash.z.wallet.sdk.rpc.CompactBlock
+	(*CompactTx)(nil),     // 2: cash.z.wallet.sdk.rpc.CompactTx
+	(*CompactSpend)(nil),  // 3: cash.z.wallet.sdk.rpc.CompactSpend
+	(*CompactOutput)(nil), // 4: cash.z.wallet.sdk.rpc.CompactOutput
 }
 var file_compact_formats_proto_depIdxs = []int32{
-	1, // 0: cash.z.wallet.sdk.rpc.CompactBlock.vtx:type_name -> cash.z.wallet.sdk.rpc.CompactTx
-	2, // 1: cash.z.wallet.sdk.rpc.CompactTx.spends:type_name -> cash.z.wallet.sdk.rpc.CompactSpend
-	3, // 2: cash.z.wallet.sdk.rpc.CompactTx.outputs:type_name -> cash.z.wallet.sdk.rpc.CompactOutput
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	2, // 0: cash.z.wallet.sdk.rpc.CompactBlock.vtx:type_name -> cash.z.wallet.sdk.rpc.CompactTx
+	0, // 1: cash.z.wallet.sdk.rpc.CompactBlock.chainMetadata:type_name -> cash.z.wallet.sdk.rpc.ChainMetadata
+	3, // 2: cash.z.wallet.sdk.rpc.CompactTx.spends:type_name -> cash.z.wallet.sdk.rpc.CompactSpend
+	4, // 3: cash.z.wallet.sdk.rpc.CompactTx.outputs:type_name -> cash.z.wallet.sdk.rpc.CompactOutput
+	4, // [4:4] is the sub-list for method output_type
+	4, // [4:4] is the sub-list for method input_type
+	4, // [4:4] is the sub-list for extension type_name
+	4, // [4:4] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_compact_formats_proto_init() }
@@ -418,7 +476,7 @@ func file_compact_formats_proto_init() {
 	}
 	if !protoimpl.UnsafeEnabled {
 		file_compact_formats_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CompactBlock); i {
+			switch v := v.(*ChainMetadata); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -430,7 +488,7 @@ func file_compact_formats_proto_init() {
 			}
 		}
 		file_compact_formats_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CompactTx); i {
+			switch v := v.(*CompactBlock); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -442,7 +500,7 @@ func file_compact_formats_proto_init() {
 			}
 		}
 		file_compact_formats_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
-			switch v := v.(*CompactSpend); i {
+			switch v := v.(*CompactTx); i {
 			case 0:
 				return &v.state
 			case 1:
@@ -454,6 +512,18 @@ func file_compact_formats_proto_init() {
 			}
 		}
 		file_compact_formats_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
+			switch v := v.(*CompactSpend); i {
+			case 0:
+				return &v.state
+			case 1:
+				return &v.sizeCache
+			case 2:
+				return &v.unknownFields
+			default:
+				return nil
+			}
+		}
+		file_compact_formats_proto_msgTypes[4].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*CompactOutput); i {
 			case 0:
 				return &v.state
@@ -466,13 +536,14 @@ func file_compact_formats_proto_init() {
 			}
 		}
 	}
+	file_compact_formats_proto_msgTypes[0].OneofWrappers = []interface{}{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_compact_formats_proto_rawDesc,
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

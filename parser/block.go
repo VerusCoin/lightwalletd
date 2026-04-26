@@ -138,14 +138,16 @@ func (b *Block) ToCompact() *walletrpc.CompactBlock {
 // ToCompactWithTreeSize returns the compact representation of the full block,
 // including a cumulative Sapling commitment tree size.
 func (b *Block) ToCompactWithTreeSize(treeSize uint64) *walletrpc.CompactBlock {
+        size := treeSize
 	compactBlock := &walletrpc.CompactBlock{
 		//TODO ProtoVersion: 1,
 		Height:   uint64(b.GetHeight()),
 		PrevHash: b.hdr.HashPrevBlock,
 		Hash:     b.GetEncodableHash(),
 		Time:     b.hdr.Time,
-
-		SaplingCommitmentTreeSize: treeSize,
+		ChainMetadata: &walletrpc.ChainMetadata{
+			SaplingCommitmentTreeSize: &size,
+		},
 	}
 
 	saplingTxns := make([]*walletrpc.CompactTx, 0, len(b.vtx))
