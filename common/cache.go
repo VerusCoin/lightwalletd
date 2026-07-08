@@ -357,24 +357,6 @@ func (c *BlockCache) flushBlocks(height int, last int) {
 	c.storeNewHeight(true)
 }
 
-/*func (c *BlockCache) flushBlock(height int) {
-	key := []byte(blockHashPrefix + strconv.Itoa(height))
-	// lets sync these, want deleted items to stay deleted even if we crash
-	err := c.ldb.Delete(key, &opt.WriteOptions{Sync: false})
-	if err != nil {
-		Log.Warning("error flushing block at height: ", err)
-		if c.latestHash != nil {
-			var hashID = make([]byte, 33)
-			copy(hashID, blockHashPrefix)
-			hashID = append(hashID, c.latestHash...)
-			err = c.ldb.Delete(hashID, &opt.WriteOptions{Sync: false})
-			if err != nil {
-				Log.Warning("flushing block by hash at height: ", err)
-			}
-		}
-	}
-}*/
-
 func (c *BlockCache) flushBlock(height int) {
 	key := []byte(blockHeightPrefix + strconv.Itoa(height))
 	err := c.ldb.Delete(key, &opt.WriteOptions{Sync: false})
