@@ -22,6 +22,7 @@ const (
 	blockHeightPrefix = "B" // key is "B" + block height, value is block; see also H, block by hash
 	blockHashPrefix   = "H" // key is "H" + block hash, value is block; see also B, block by height
 	idPrefix          = "I" // key is "I" + chain ID, value is height (more to come), see next (verusID)
+	saplingTreePrefix = "S" // key is "S", value is sapling tree size by height
 )
 
 // BlockCache contains a consecutive set of recent compact blocks in marshalled form.
@@ -220,36 +221,61 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 		Log.Fatal("cache.Add height going backwards: ", height)
 		return nil
 	}
-	bheight := int(block.Height)
 
-	if bheight != height {
-		// This could only happen if zcashd returned the wrong
-		// block (not the height we requested).
-		Log.Fatal("cache.Add wrong height: ", bheight, " expecting: ", height)
+	if int(block.Height) != height {
+		Log.Fatal("cache.Add wrong height: ", block.Height, " expecting: ", height)
 		return nil
 	}
 
-	// Add the new block and its length to the db files.
+	prevSize := uint64(0)
+	if height > c.firstBlock {
+		prevSize = c.getSaplingTreeSize(height - 1)
+	}
+
+	var blockSize uint64
+	for _, tx := range block.Vtx {
+		blockSize += uint64(len(tx.Outputs))
+	}
+
+	newSize := prevSize + blockSize
+
+	block.ChainMetadata = &walletrpc.ChainMetadata{
+		SaplingCommitmentTreeSize: &newSize,
+	}
+
+	if height > c.firstBlock {
+    		prevSize := c.getSaplingTreeSize(height - 1)
+   		if newSize < prevSize {
+                        // should always increase or stay the same on inter-block basis
+        		Log.Fatal("sapling tree size decreased at height ", height)
+    		}
+	}
+
+	if err := c.storeSaplingTreeSize(height, newSize); err != nil {
+		Log.Fatal("failed to store sapling tree size at height ", height, ": ", err)
+	}
+
 	data, err := proto.Marshal(block)
 	if err != nil {
 		return err
 	}
+
 	checkSummed := checksum(height, data)
 	checkSummed = append(checkSummed, data...)
-	err = c.storeNewBlock(height, checkSummed)
-	if err != nil {
-		Log.Fatal("hash write at height", height, "failed: ", err)
-	}
-	err = c.storeNewHeight(false)
 
-	if err != nil {
-		Log.Fatal("height write with height", height, "failed: ", err)
+	if err := c.storeNewBlock(height, checkSummed); err != nil {
+		Log.Fatal("hash write failed at height", height, ": ", err)
+	}
+
+	if err := c.storeNewHeight(false); err != nil {
+		Log.Fatal("height write failed at height", height, ": ", err)
 	}
 
 	if c.latestHash == nil {
 		c.latestHash = make([]byte, len(block.Hash))
 	}
 	copy(c.latestHash, block.Hash)
+
 	c.nextBlock++
 	// Invariant: m[firstBlock..nextBlock) are valid.
 	return nil
@@ -332,22 +358,27 @@ func (c *BlockCache) flushBlocks(height int, last int) {
 }
 
 func (c *BlockCache) flushBlock(height int) {
-	key := []byte(blockHashPrefix + strconv.Itoa(height))
-	// lets sync these, want deleted items to stay deleted even if we crash
+	key := []byte(blockHeightPrefix + strconv.Itoa(height))
 	err := c.ldb.Delete(key, &opt.WriteOptions{Sync: false})
 	if err != nil {
-		Log.Warning("error flushing block at height: ", err)
-		if c.latestHash != nil {
-			var hashID = make([]byte, 33)
-			copy(hashID, blockHashPrefix)
-			hashID = append(hashID, c.latestHash...)
-			err = c.ldb.Delete(hashID, &opt.WriteOptions{Sync: false})
-			if err != nil {
-				Log.Warning("flushing block by hash at height: ", err)
-			}
+		Log.Warning("error flushing block (by height) at height ", height, ": ", err)
+	}
+
+	if c.latestHash != nil {
+		hashID := append([]byte(blockHashPrefix), c.latestHash...)
+		err = c.ldb.Delete(hashID, &opt.WriteOptions{Sync: false})
+		if err != nil {
+			Log.Warning("error flushing block (by hash) at height ", height, ": ", err)
 		}
 	}
+
+	treeKey := []byte(saplingTreePrefix + strconv.Itoa(height))
+	err = c.ldb.Delete(treeKey, &opt.WriteOptions{Sync: false})
+	if err != nil {
+		Log.Warning("error flushing sapling tree size at height ", height, ": ", err)
+	}
 }
+
 func (c *BlockCache) storeNewHeight(sync bool) error {
 	bytesHeight := make([]byte, 8)
 	binary.LittleEndian.PutUint64(bytesHeight, (uint64)(c.nextBlock&0xFFFFFFFFFFFFFFF))
@@ -369,4 +400,20 @@ func (c *BlockCache) storeNewBlock(height int, block []byte) error {
 		return err
 	}
 	return nil
+}
+
+// storeSaplingTreeSize stores cumulative tree size at a given height
+func (c *BlockCache) storeSaplingTreeSize(height int, size uint64) error {
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, size)
+	return c.ldb.Put([]byte(saplingTreePrefix+strconv.Itoa(height)), buf, &opt.WriteOptions{Sync: false})
+}
+
+// getSaplingTreeSize retrieves cumulative tree size at height
+func (c *BlockCache) getSaplingTreeSize(height int) uint64 {
+	data, err := c.ldb.Get([]byte(saplingTreePrefix+strconv.Itoa(height)), nil)
+	if err != nil || len(data) != 8 {
+		return 0
+	}
+	return binary.LittleEndian.Uint64(data)
 }
