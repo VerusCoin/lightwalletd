@@ -149,16 +149,21 @@ func (s *lwdStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*wal
 // (as also returned by GetBlock) from the block height 'start' to height
 // 'end' inclusively.
 func (s *lwdStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.CompactTxStreamer_GetBlockRangeServer) error {
-	blockChan := make(chan *walletrpc.CompactBlock)
-	errChan := make(chan error)
 	if span.Start == nil || span.End == nil {
 		return errors.New("Must specify start and end heights")
 	}
+	ctx := resp.Context()
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error)
 
-	go common.GetBlockRange(s.cache, blockChan, errChan, int(span.Start.Height), int(span.End.Height))
+	go common.GetBlockRange(ctx, s.cache, blockChan, errChan, int(span.Start.Height), int(span.End.Height))
 
 	for {
 		select {
+		case <-ctx.Done():
+			// client disconnected or deadline exceeded; the producer
+			// goroutine observes the same ctx and exits.
+			return ctx.Err()
 		case err := <-errChan:
 			// this will also catch context.DeadlineExceeded from the timeout
 			return err
