@@ -6,17 +6,25 @@ package common
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/asherda/lightwalletd/walletrpc"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/storage"
+	"github.com/veruscoin/lightwalletd/parser"
+	"github.com/veruscoin/lightwalletd/walletrpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // ------------------------------------------ Setup
@@ -62,7 +70,12 @@ func TestMain(m *testing.M) {
 		blockJSON, _ := json.Marshal(scan.Text())
 		blocks = append(blocks, blockJSON)
 	}
-	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, true)
+	db, err := leveldb.Open(storage.NewMemStorage(), nil)
+	if err != nil {
+		os.Stderr.WriteString(fmt.Sprintf("Cannot open test cache db: %v", err))
+		os.Exit(1)
+	}
+	testcache = NewBlockCache(db, unitTestChain, 380640, true)
 
 	// Setup is done; run all tests.
 	exitcode := m.Run()
@@ -86,9 +99,20 @@ func nowStub() time.Time {
 	return start.Add(sleepDuration)
 }
 
+// afterStub returns a pre-fired channel so the select case in GetMempool's
+// cancel-aware sleep fires immediately, accumulating sleepDuration like
+// sleepStub does. Used by tests that exercise GetMempool's wait loop.
+func afterStub(d time.Duration) <-chan time.Time {
+	sleepCount++
+	sleepDuration += d
+	ch := make(chan time.Time, 1)
+	ch <- time.Time{}
+	return ch
+}
+
 // ------------------------------------------ GetLightdInfo()
 
-func getLightdInfoStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getLightdInfoStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	step++
 	switch method {
 	case "getinfo":
@@ -105,9 +129,10 @@ func getLightdInfoStub(method string, params []json.RawMessage) (json.RawMessage
 				testT.Error("unexpected sleeps", sleepCount, sleepDuration)
 			}
 		}
+		// GetLightdInfo reports ChainName from `name`.
 		r, _ := json.Marshal(&ZcashdRpcReplyGetblockchaininfo{
 			Blocks:    9977,
-			Chain:     "bugsbunny",
+			Name:      "bugsbunny",
 			Consensus: ConsensusInfo{Chaintip: "someid"},
 		})
 		return r, nil
@@ -176,7 +201,7 @@ func checkSleepMethod(count int, duration time.Duration, expected string, method
 }
 
 // There are four test blocks, 0..3
-func blockIngestorStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func blockIngestorStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	step++
 	// request the first two blocks very quickly (syncing),
 	// then next block isn't yet available
@@ -354,8 +379,7 @@ func TestBlockIngestor(t *testing.T) {
 	RawRequest = blockIngestorStub
 	Time.Sleep = sleepStub
 	Time.Now = nowStub
-	os.RemoveAll(unitTestPath)
-	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, false)
+	testcache = NewBlockCache(testCacheDB(t), unitTestChain, 380640, false)
 	BlockIngestor(testcache, 11)
 	if step != 19 {
 		t.Error("unexpected final step", step)
@@ -363,14 +387,13 @@ func TestBlockIngestor(t *testing.T) {
 	step = 0
 	sleepCount = 0
 	sleepDuration = 0
-	os.RemoveAll(unitTestPath)
 }
 
 // ------------------------------------------ GetBlockRange()
 
 // There are four test blocks, 0..3
 // (probably don't need all these cases)
-func getblockStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getblockStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	if method != "getblock" {
 		testT.Error("unexpected method")
 	}
@@ -487,11 +510,10 @@ func getblockStub(method string, params []json.RawMessage) (json.RawMessage, err
 func TestGetBlockRange(t *testing.T) {
 	testT = t
 	RawRequest = getblockStub
-	os.RemoveAll(unitTestPath)
-	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, true)
+	testcache = NewBlockCache(testCacheDB(t), unitTestChain, 380640, true)
 	blockChan := make(chan *walletrpc.CompactBlock)
 	errChan := make(chan error)
-	go GetBlockRange(testcache, blockChan, errChan, 380640, 380642)
+	go GetBlockRange(context.Background(), testcache, blockChan, errChan, 380640, 380642)
 
 	// read in block 380640
 	select {
@@ -527,11 +549,204 @@ func TestGetBlockRange(t *testing.T) {
 	}
 
 	step = 0
-	os.RemoveAll(unitTestPath)
+}
+
+// staleForkCache returns a cache holding a block with a mismatched hash to simulate a reorg.
+func staleForkCache(t *testing.T) *BlockCache {
+	cache := NewBlockCache(testCacheDB(t), unitTestChain, 380640, false)
+	err := cache.Add(380640, &walletrpc.CompactBlock{
+		Height:   380640,
+		Hash:     bytes.Repeat([]byte{0xa1}, 32),
+		PrevHash: bytes.Repeat([]byte{0xa0}, 32),
+	})
+	if err != nil {
+		t.Fatal("cache.Add failed:", err)
+	}
+	return cache
+}
+
+// discontinuityStub mocks RPC getblock for height 380641.
+func discontinuityStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
+	if method != "getblock" {
+		testT.Error("unexpected method")
+	}
+	var height string
+	if err := json.Unmarshal(params[0], &height); err != nil {
+		testT.Fatal("could not unmarshal height")
+	}
+
+	step++
+	switch step {
+	case 1:
+		if height != "380641" {
+			testT.Error("unexpected height", height)
+		}
+		return blocks[1], nil
+	}
+	testT.Error("discontinuityStub called too many times")
+	return nil, nil
+}
+
+// resetGlobals restores global state between test runs.
+func resetGlobals() {
+	step = 0
+	sleepCount = 0
+	sleepDuration = 0
+	RawRequest = nil
+	Time.Sleep = nil
+	Time.Now = nil
+	Time.After = nil
+	g_lastBlockChainInfo = &ZcashdRpcReplyGetblockchaininfo{}
+	g_lastTime = time.Time{}
+	g_txidSeen = map[txid]struct{}{}
+	g_txList = []*walletrpc.RawTransaction{}
+}
+
+// checkDiscontinuity verifies GetBlockRange returns a discontinuity error.
+func checkDiscontinuity(t *testing.T, blockChan <-chan *walletrpc.CompactBlock, errChan <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errChan:
+		if status.Code(err) != codes.Aborted {
+			t.Fatal("unexpected error code:", status.Code(err), err)
+		}
+		if !strings.Contains(err.Error(), "chain discontinuity") {
+			t.Fatal("unexpected error:", err)
+		}
+	case cBlock := <-blockChan:
+		t.Fatal("streamed a block that doesn't connect, height:", cBlock.Height)
+	}
+}
+
+func TestGetBlockRangeDiscontinuity(t *testing.T) {
+	testT = t
+	RawRequest = discontinuityStub
+	defer resetGlobals()
+	testcache = staleForkCache(t)
+
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error)
+	go GetBlockRange(context.Background(), testcache, blockChan, errChan, 380640, 380641)
+
+	// The stale 380640 goes out before there's anything to compare it
+	// against; the mismatch can only be detected once 380641 arrives.
+	select {
+	case err := <-errChan:
+		t.Fatal("unexpected error:", err)
+	case cBlock := <-blockChan:
+		if cBlock.Height != 380640 {
+			t.Fatal("unexpected Height:", cBlock.Height)
+		}
+	}
+
+	// blocks[1].PrevHash is the real 380640 hash, not the stale one.
+	checkDiscontinuity(t, blockChan, errChan)
+
+	if step != 1 {
+		t.Fatal("unexpected step:", step)
+	}
+}
+
+// Same as TestGetBlockRangeDiscontinuity, but with start greater than end, so
+// the blocks are compared in the other direction.
+func TestGetBlockRangeDiscontinuityReverse(t *testing.T) {
+	testT = t
+	RawRequest = discontinuityStub
+	defer resetGlobals()
+	testcache = staleForkCache(t)
+
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error)
+	go GetBlockRange(context.Background(), testcache, blockChan, errChan, 380641, 380640)
+
+	// read in block 380641 (from the backend, the current fork)
+	select {
+	case err := <-errChan:
+		t.Fatal("unexpected error:", err)
+	case cBlock := <-blockChan:
+		if cBlock.Height != 380641 {
+			t.Fatal("unexpected Height:", cBlock.Height)
+		}
+	}
+
+	// The stale cached 380640 isn't the block that 380641 descends from.
+	checkDiscontinuity(t, blockChan, errChan)
+
+	if step != 1 {
+		t.Fatal("unexpected step:", step)
+	}
+}
+
+// The same cache/backend split, but with a cached block that really is the
+// parent of the backend's block: the range must stream normally. Without this,
+// nothing covers the happy path across the cache/backend boundary, which is
+// every wallet syncing at the cache tip.
+func TestGetBlockRangeContiguousReverse(t *testing.T) {
+	testT = t
+	RawRequest = discontinuityStub
+	defer resetGlobals()
+	testcache = NewBlockCache(testCacheDB(t), unitTestChain, 380640, false)
+
+	// Cache the real 380640, the block that the backend's 380641 descends from.
+	block := parser.NewBlock()
+	var blockHex string
+	if err := json.Unmarshal(blocks[0], &blockHex); err != nil {
+		t.Fatal("could not unmarshal test block:", err)
+	}
+	blockBytes, err := hex.DecodeString(blockHex)
+	if err != nil {
+		t.Fatal("could not decode test block:", err)
+	}
+	if _, err := block.ParseFromSlice(blockBytes); err != nil {
+		t.Fatal("could not parse test block:", err)
+	}
+	if err := testcache.Add(380640, block.ToCompact()); err != nil {
+		t.Fatal("cache.Add failed:", err)
+	}
+
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error)
+	go GetBlockRange(context.Background(), testcache, blockChan, errChan, 380641, 380640)
+
+	for _, height := range []uint64{380641, 380640} {
+		select {
+		case err := <-errChan:
+			t.Fatal("unexpected error:", err)
+		case cBlock := <-blockChan:
+			if cBlock.Height != height {
+				t.Fatal("unexpected Height:", cBlock.Height)
+			}
+		}
+	}
+	if err := <-errChan; err != nil {
+		t.Fatal("unexpected error:", err)
+	}
+}
+
+func TestGetBlockRangeCancelsInFlightRPC(t *testing.T) {
+	RawRequest = func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	testcache = NewBlockCache(testCacheDB(t), unitTestChain, 380640, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		GetBlockRange(ctx, testcache, blockChan, errChan, 380640, 380640)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetBlockRange did not exit after context cancellation")
+	case <-done:
+	}
 }
 
 // There are four test blocks, 0..3
-func getblockStubReverse(method string, params []json.RawMessage) (json.RawMessage, error) {
+func getblockStubReverse(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	var height string
 	err := json.Unmarshal(params[0], &height)
 	if err != nil {
@@ -566,13 +781,12 @@ func getblockStubReverse(method string, params []json.RawMessage) (json.RawMessa
 func TestGetBlockRangeReverse(t *testing.T) {
 	testT = t
 	RawRequest = getblockStubReverse
-	os.RemoveAll(unitTestPath)
-	testcache = NewBlockCache(unitTestPath, unitTestChain, 380640, true)
+	testcache = NewBlockCache(testCacheDB(t), unitTestChain, 380640, true)
 	blockChan := make(chan *walletrpc.CompactBlock)
 	errChan := make(chan error)
 
 	// Request the blocks in reverse order by specifying start greater than end
-	go GetBlockRange(testcache, blockChan, errChan, 380642, 380640)
+	go GetBlockRange(context.Background(), testcache, blockChan, errChan, 380642, 380640)
 
 	// read in block 380642
 	select {
@@ -607,7 +821,6 @@ func TestGetBlockRangeReverse(t *testing.T) {
 		}
 	}
 	step = 0
-	os.RemoveAll(unitTestPath)
 }
 
 func TestGenerateCerts(t *testing.T) {
@@ -621,7 +834,7 @@ func TestGenerateCerts(t *testing.T) {
 // Note that in mocking zcashd's RPC replies here, we don't really need
 // actual txids or transactions, or even strings with the correct format
 // for those, except that a transaction must be a hex string.
-func mempoolStub(method string, params []json.RawMessage) (json.RawMessage, error) {
+func mempoolStub(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
 	step++
 	switch step {
 	case 1:
@@ -664,7 +877,7 @@ func mempoolStub(method string, params []json.RawMessage) (json.RawMessage, erro
 		if txid != "mempooltxid-1" {
 			testT.Fatal("unexpected txid")
 		}
-		r, _ := json.Marshal("aabb")
+		r, _ := json.Marshal(map[string]string{"hex": "aabb"})
 		return r, nil
 	case 5:
 		// Simulate that still no new block has arrived ...
@@ -696,7 +909,7 @@ func mempoolStub(method string, params []json.RawMessage) (json.RawMessage, erro
 		if txid != "mempooltxid-2" {
 			testT.Fatal("unexpected txid")
 		}
-		r, _ := json.Marshal("ccdd")
+		r, _ := json.Marshal(map[string]string{"hex": "ccdd"})
 		return r, nil
 	case 8:
 		// A new block arrives, this will cause these two tx to be returned
@@ -718,26 +931,27 @@ func TestMempoolStream(t *testing.T) {
 	RawRequest = mempoolStub
 	Time.Sleep = sleepStub
 	Time.Now = nowStub
+	Time.After = afterStub
 	// In real life, wall time is not close to zero, simulate that.
 	sleepDuration = 1000 * time.Second
 
 	var replies []*walletrpc.RawTransaction
 	// The first request after startup immediately returns an empty list.
-	err := GetMempool(func(tx *walletrpc.RawTransaction) error {
+	err := GetMempool(context.Background(), func(tx *walletrpc.RawTransaction) error {
 		t.Fatal("send to client function called on initial GetMempool call")
 		return nil
 	})
 	if err != nil {
-		t.Fatal("GetMempool failed")
+		t.Errorf("GetMempool failed: %v", err)
 	}
 
 	// This should return two transactions.
-	err = GetMempool(func(tx *walletrpc.RawTransaction) error {
+	err = GetMempool(context.Background(), func(tx *walletrpc.RawTransaction) error {
 		replies = append(replies, tx)
 		return nil
 	})
 	if err != nil {
-		t.Fatal("GetMempool failed")
+		t.Errorf("GetMempool failed: %v", err)
 	}
 	if len(replies) != 2 {
 		t.Fatal("unexpected number of tx")
@@ -747,13 +961,13 @@ func TestMempoolStream(t *testing.T) {
 	if !bytes.Equal([]byte(replies[0].GetData()), []byte{0xaa, 0xbb}) {
 		t.Fatal("unexpected tx contents")
 	}
-	if replies[0].GetHeight() != 200 {
+	if replies[0].GetHeight() != 0 {
 		t.Fatal("unexpected tx height")
 	}
 	if !bytes.Equal([]byte(replies[1].GetData()), []byte{0xcc, 0xdd}) {
 		t.Fatal("unexpected tx contents")
 	}
-	if replies[1].GetHeight() != 200 {
+	if replies[1].GetHeight() != 0 {
 		t.Fatal("unexpected tx height")
 	}
 
@@ -767,6 +981,104 @@ func TestMempoolStream(t *testing.T) {
 	}
 
 	step = 0
+	sleepCount = 0
+	sleepDuration = 0
+}
+
+func TestParseRawTransaction(t *testing.T) {
+	rt0, err0 := ParseRawTransaction([]byte("{\"hex\": \"deadbeef\", \"height\": 123456}"))
+	if err0 != nil {
+		t.Fatal("Failed to parse raw transaction response with known height.")
+	}
+	if rt0.Height != 123456 {
+		t.Errorf("Unmarshalled incorrect height: got: %d, expected: 123456.", rt0.Height)
+	}
+
+	rt1, err1 := ParseRawTransaction([]byte("{\"hex\": \"deadbeef\", \"height\": -1}"))
+	if err1 != nil {
+		t.Fatal("Failed to parse raw transaction response for a known tx not in the main chain.")
+	}
+	// We expect the int64 value `-1` to have been reinterpreted as a uint64 value in order
+	// to be representable as a uint64 in `RawTransaction`. The conversion from the twos-complement
+	// signed representation should map `-1` to `math.MaxUint64`.
+	if rt1.Height != math.MaxUint64 {
+		t.Errorf("Unmarshalled incorrect height: got: %d, want: 0x%X.", rt1.Height, uint64(math.MaxUint64))
+	}
+
+	rt2, err2 := ParseRawTransaction([]byte("{\"hex\": \"deadbeef\"}"))
+	if err2 != nil {
+		t.Fatal("Failed to parse raw transaction response for a tx in the mempool.")
+	}
+	if rt2.Height != 0 {
+		t.Errorf("Unmarshalled incorrect height: got: %d, expected: 0.", rt2.Height)
+	}
+}
+
+// TestMempoolStreamCancelOnEmptyMempool is the regression test for the fix in
+// this PR. Without the fix, GetMempool on an empty mempool with stable tip
+// hash never observes ctx.Done because sendToClient is never invoked and the
+// 200ms Time.Sleep is non-cancellable. With the fix, the cancel-aware select
+// at the bottom of the loop returns promptly with ctx.Err().
+func TestMempoolStreamCancelOnEmptyMempool(t *testing.T) {
+	// Stub RawRequest to return a stable empty-mempool / stable-tip world,
+	// so the loop parks at the cancel-aware sleep with no work and no tip
+	// change to break out.
+	RawRequest = func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error) {
+		switch method {
+		case "getblockchaininfo":
+			r, _ := json.Marshal(&ZcashdRpcReplyGetblockchaininfo{
+				BestBlockHash: "stable-hash",
+				Blocks:        100,
+			})
+			return r, nil
+		case "getrawmempool":
+			return json.RawMessage("[]"), nil
+		}
+		return nil, errors.New("unexpected RPC: " + method)
+	}
+	// Real time for the cancel-aware sleep so ctx.Done has a real race with
+	// the 200ms timer. afterStub would fire instantly and the test would not
+	// exercise the cancel path deterministically.
+	Time.After = time.After
+	Time.Sleep = sleepStub
+	Time.Now = time.Now
+
+	// Pre-populate the package-global tip cache so the first refresh matches
+	// the stubbed tip and does NOT trigger the tip-changed branch (which
+	// would break out of the loop immediately).
+	g_lastBlockChainInfo = &ZcashdRpcReplyGetblockchaininfo{BestBlockHash: "stable-hash"}
+	g_lastTime = time.Time{}
+	g_txidSeen = map[txid]struct{}{}
+	g_txList = []*walletrpc.RawTransaction{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan error, 1)
+	go func() {
+		done <- GetMempool(ctx, func(tx *walletrpc.RawTransaction) error {
+			t.Error("sendToClient must not be invoked on empty mempool")
+			return nil
+		})
+	}()
+
+	// Let the loop reach the cancel-aware select.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("GetMempool did not return within 2s of cancel; the cancel-aware select is not effective")
+	}
+
+	// Reset shared state for any subsequent tests.
+	g_lastBlockChainInfo = &ZcashdRpcReplyGetblockchaininfo{}
+	g_lastTime = time.Time{}
+	g_txidSeen = map[txid]struct{}{}
+	g_txList = []*walletrpc.RawTransaction{}
 	sleepCount = 0
 	sleepDuration = 0
 }

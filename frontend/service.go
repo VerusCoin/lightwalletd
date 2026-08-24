@@ -17,9 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/asherda/lightwalletd/common"
-	"github.com/asherda/lightwalletd/parser"
-	"github.com/asherda/lightwalletd/walletrpc"
+	"github.com/veruscoin/lightwalletd/common"
+	"github.com/veruscoin/lightwalletd/parser"
+	"github.com/veruscoin/lightwalletd/walletrpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type lwdStreamer struct {
@@ -48,14 +50,20 @@ func NewDarksideStreamer(cache *common.BlockCache) (walletrpc.DarksideStreamerSe
 // Test to make sure Address is a single t address
 func checkTaddress(taddr string) error {
 	match, err := regexp.Match("\\AR[a-zA-Z0-9]{33}\\z", []byte(taddr))
-	if err != nil || !match {
-		return errors.New("Invalid address")
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument,
+			"checkTaddress: invalid transparent address: %s error: %s", taddr, err.Error())
+	}
+	if !match {
+		return status.Errorf(codes.InvalidArgument,
+			"checkTaddress: transparent address %s contains invalid characters", taddr)
 	}
 	return nil
 }
 
 // GetLatestBlock returns the height of the best chain, according to zcashd.
 func (s *lwdStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc.ChainSpec) (*walletrpc.BlockID, error) {
+	common.Log.Debugf("gRPC GetLatestBlock(%+v)\n", placeholder)
 	latestBlock := s.cache.GetLatestHeight()
 	latestHash := s.cache.GetLatestHash()
 
@@ -63,12 +71,15 @@ func (s *lwdStreamer) GetLatestBlock(ctx context.Context, placeholder *walletrpc
 		return nil, errors.New("Cache is empty. Server is probably not yet ready")
 	}
 
-	return &walletrpc.BlockID{Height: uint64(latestBlock), Hash: latestHash}, nil
+	r := &walletrpc.BlockID{Height: uint64(latestBlock), Hash: latestHash}
+	common.Log.Tracef("  return: %+v\n", r)
+	return r, nil
 }
 
 // GetTaddressTxids is a streaming RPC that returns transaction IDs that have
 // the given transparent address (taddr) as either an input or output.
 func (s *lwdStreamer) GetTaddressTxids(addressBlockFilter *walletrpc.TransparentAddressBlockFilter, resp walletrpc.CompactTxStreamer_GetTaddressTxidsServer) error {
+	common.Log.Debugf("gRPC GetTaddressTxids(%+v)\n", addressBlockFilter)
 	if err := checkTaddress(addressBlockFilter.Address); err != nil {
 		return err
 	}
@@ -93,7 +104,7 @@ func (s *lwdStreamer) GetTaddressTxids(addressBlockFilter *walletrpc.Transparent
 		return err
 	}
 	params[0] = param
-	result, rpcErr := common.RawRequest("getaddresstxids", params)
+	result, rpcErr := common.RawRequest(resp.Context(), "getaddresstxids", params)
 
 	// For some reason, the error responses are not JSON
 	if rpcErr != nil {
@@ -127,6 +138,7 @@ func (s *lwdStreamer) GetTaddressTxids(addressBlockFilter *walletrpc.Transparent
 // GetBlock returns the compact block at the requested height. Requesting a
 // block by hash is not yet supported.
 func (s *lwdStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*walletrpc.CompactBlock, error) {
+	common.Log.Debugf("gRPC GetBlock(%+v)\n", id)
 	if id.Height == 0 && id.Hash == nil {
 		return nil, errors.New("request for unspecified identifier")
 	}
@@ -136,12 +148,13 @@ func (s *lwdStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*wal
 		// TODO: Get block by hash
 		return nil, errors.New("GetBlock by Hash is not yet implemented")
 	}
-	cBlock, err := common.GetBlock(s.cache, int(id.Height))
+	cBlock, err := common.GetBlock(ctx, s.cache, int(id.Height))
 
 	if err != nil {
 		return nil, err
 	}
 
+	common.Log.Tracef("  return: %+v\n", cBlock)
 	return cBlock, err
 }
 
@@ -149,16 +162,21 @@ func (s *lwdStreamer) GetBlock(ctx context.Context, id *walletrpc.BlockID) (*wal
 // (as also returned by GetBlock) from the block height 'start' to height
 // 'end' inclusively.
 func (s *lwdStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.CompactTxStreamer_GetBlockRangeServer) error {
-	blockChan := make(chan *walletrpc.CompactBlock)
-	errChan := make(chan error)
+	common.Log.Debugf("gRPC GetBlockRange(%+v)\n", span)
 	if span.Start == nil || span.End == nil {
 		return errors.New("Must specify start and end heights")
 	}
-
-	go common.GetBlockRange(s.cache, blockChan, errChan, int(span.Start.Height), int(span.End.Height))
+	ctx := resp.Context()
+	blockChan := make(chan *walletrpc.CompactBlock)
+	errChan := make(chan error)
+	go common.GetBlockRange(ctx, s.cache, blockChan, errChan, int(span.Start.Height), int(span.End.Height))
 
 	for {
 		select {
+		case <-ctx.Done():
+			// Client cancelled / deadline exceeded; the producer's select-on-ctx
+			// will unblock its in-flight send and exit.
+			return ctx.Err()
 		case err := <-errChan:
 			// this will also catch context.DeadlineExceeded from the timeout
 			return err
@@ -174,6 +192,9 @@ func (s *lwdStreamer) GetBlockRange(span *walletrpc.BlockRange, resp walletrpc.C
 // GetTreeState returns the note commitment tree state corresponding to the given block.
 // See section 3.7 of the Zcash protocol specification. It returns several other useful
 // values also (even though they can be obtained using GetBlock).
+// blockHashLen is the length in bytes of a Zcash block hash.
+const blockHashLen = 32
+
 // The block can be specified by either height or hash.
 func (s *lwdStreamer) GetTreeState(ctx context.Context, id *walletrpc.BlockID) (*walletrpc.TreeState, error) {
 	if id.Height == 0 && id.Hash == nil {
@@ -187,10 +208,22 @@ func (s *lwdStreamer) GetTreeState(ctx context.Context, id *walletrpc.BlockID) (
 		if err != nil {
 			return nil, err
 		}
+		common.Log.Debugf("gRPC GetTreeState(height=%+v)\n", id.Height)
 		params[0] = heightJSON
 	} else {
+		// Reject a wrong-length hash before expanding it: the bytes below are
+		// hex-encoded (doubling them) and JSON-marshalled before zcashd ever
+		// sees them, so without this an unauthenticated client can force large
+		// allocations here and parsing work in the backend with input that can
+		// only ever be rejected (GHSA-q2c2-hpp9-58hm).
+		if len(id.Hash) != blockHashLen {
+			return nil, status.Errorf(codes.InvalidArgument,
+				"GetTreeState: block hash has invalid length: %d", len(id.Hash))
+		}
 		// id.Hash is big-endian, keep in big-endian for the rpc
-		hashJSON, err := json.Marshal(hex.EncodeToString(id.Hash))
+		hash := hex.EncodeToString(id.Hash)
+		common.Log.Debugf("gRPC GetTreeState(hash=%+v)\n", hash)
+		hashJSON, err := json.Marshal(hash)
 		if err != nil {
 			return nil, err
 		}
@@ -198,7 +231,16 @@ func (s *lwdStreamer) GetTreeState(ctx context.Context, id *walletrpc.BlockID) (
 	}
 	var gettreestateReply common.ZcashdRpcReplyGettreestate
 	for {
-		result, rpcErr := common.RawRequest("z_gettreestate", params)
+		// Hygiene companion to PR #560: observe client cancel between
+		// RawRequest calls. In practice this loop terminates in one iteration
+		// on the active chain because zcashd's z_gettreestate hard-stops the
+		// SkipHash walk at the Sapling activation height (zcashd
+		// src/rpc/blockchain.cpp:1411). This check is for symmetry with the
+		// other streaming-RPC ctx-checks, not for DoS defense.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		result, rpcErr := common.RawRequest(ctx, "z_gettreestate", params)
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -221,59 +263,57 @@ func (s *lwdStreamer) GetTreeState(ctx context.Context, id *walletrpc.BlockID) (
 	if gettreestateReply.Sapling.Commitments.FinalState == "" {
 		return nil, errors.New("zcashd did not return treestate")
 	}
-	return &walletrpc.TreeState{
+	r := &walletrpc.TreeState{
 		Network: s.chainName,
 		Height:  uint64(gettreestateReply.Height),
 		Hash:    gettreestateReply.Hash,
 		Time:    gettreestateReply.Time,
 		Tree:    gettreestateReply.Sapling.Commitments.FinalState,
-	}, nil
+	}
+	common.Log.Tracef("  return: %+v\n", r)
+	return r, nil
 }
 
 func (s *lwdStreamer) GetLatestTreeState(ctx context.Context, in *walletrpc.Empty) (*walletrpc.TreeState, error) {
+	common.Log.Debugf("gRPC GetLatestTreeState()\n")
 	latestHeight := s.cache.GetLatestHeight()
 
 	if latestHeight == -1 {
 		return nil, errors.New("Cache is empty. Server is probably not yet ready")
 	}
-	return s.GetTreeState(ctx, &walletrpc.BlockID{Height: uint64(latestHeight)})
+	r, err := s.GetTreeState(ctx, &walletrpc.BlockID{Height: uint64(latestHeight)})
+	if err == nil {
+		common.Log.Tracef("  return: %+v\n", r)
+	}
+	return r, err
 }
 
 // GetTransaction returns the raw transaction bytes that are returned
 // by the zcashd 'getrawtransaction' RPC.
 func (s *lwdStreamer) GetTransaction(ctx context.Context, txf *walletrpc.TxFilter) (*walletrpc.RawTransaction, error) {
+	common.Log.Debugf("gRPC GetTransaction(%+v)\n", txf)
 	if txf.Hash != nil {
 		if len(txf.Hash) != 32 {
 			return nil, errors.New("Transaction ID has invalid length")
 		}
-		leHashStringJSON, err := json.Marshal(hex.EncodeToString(parser.Reverse(txf.Hash)))
+		txidJSON, err := json.Marshal(hex.EncodeToString(parser.Reverse(txf.Hash)))
 		if err != nil {
 			return nil, err
 		}
-		params := []json.RawMessage{
-			leHashStringJSON,
-			json.RawMessage("1"),
-		}
-		result, rpcErr := common.RawRequest("getrawtransaction", params)
 
-		// For some reason, the error responses are not JSON
+		params := []json.RawMessage{txidJSON, json.RawMessage("1")}
+		result, rpcErr := common.RawRequest(ctx, "getrawtransaction", params)
 		if rpcErr != nil {
+			// For some reason, the error responses are not JSON
 			return nil, rpcErr
 		}
-		// Many other fields are returned, but we need only these two.
-		var txinfo common.ZcashdRpcReplyGetrawtransaction
-		err = json.Unmarshal(result, &txinfo)
+
+		r, err := common.ParseRawTransaction(result)
 		if err != nil {
 			return nil, err
 		}
-		txBytes, err := hex.DecodeString(txinfo.Hex)
-		if err != nil {
-			return nil, err
-		}
-		return &walletrpc.RawTransaction{
-			Data:   txBytes,
-			Height: uint64(txinfo.Height),
-		}, nil
+		common.Log.Tracef("  return: %+v\n", r)
+		return r, nil
 	}
 
 	if txf.Block != nil && txf.Block.Hash != nil {
@@ -288,8 +328,15 @@ func (s *lwdStreamer) GetLightdInfo(ctx context.Context, in *walletrpc.Empty) (*
 	return common.GetLightdInfo()
 }
 
+// maxRawTxSize bounds the raw transaction bytes lightwalletd will forward to
+// zcashd. A Zcash transaction cannot exceed the 2,000,000-byte block size
+// limit, so anything larger is unminable by definition and there is no reason
+// to spend memory expanding it or to make the backend parse it.
+const maxRawTxSize = 2000000
+
 // SendTransaction forwards raw transaction bytes to a zcashd instance over JSON-RPC
 func (s *lwdStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawTransaction) (*walletrpc.SendResponse, error) {
+	common.Log.Debugf("gRPC SendTransaction(%+v)\n", rawtx)
 	// sendrawtransaction "hexstring" ( allowhighfees )
 	//
 	// Submits raw transaction (binary) to local node and network.
@@ -301,6 +348,16 @@ func (s *lwdStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawT
 	if rawtx == nil || rawtx.Data == nil {
 		return nil, errors.New("Bad transaction data")
 	}
+	// Reject an oversized transaction before expanding it: the bytes below are
+	// hex-encoded (doubling them) and JSON-marshalled before zcashd ever sees
+	// them, so without this an unauthenticated client can force large
+	// allocations here and parsing work in the backend with a transaction that
+	// can never be mined (GHSA-6ppp-r2gc-9q6v).
+	if len(rawtx.Data) > maxRawTxSize {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"SendTransaction: transaction is too large: %d bytes (limit %d)",
+			len(rawtx.Data), maxRawTxSize)
+	}
 
 	// Construct raw JSON-RPC params
 	params := make([]json.RawMessage, 1)
@@ -309,7 +366,7 @@ func (s *lwdStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawT
 		return &walletrpc.SendResponse{}, err
 	}
 	params[0] = txJSON
-	result, rpcErr := common.RawRequest("sendrawtransaction", params)
+	result, rpcErr := common.RawRequest(ctx, "sendrawtransaction", params)
 
 	var errCode int64
 	var errMsg string
@@ -333,13 +390,15 @@ func (s *lwdStreamer) SendTransaction(ctx context.Context, rawtx *walletrpc.RawT
 
 	// TODO these are called Error but they aren't at the moment.
 	// A success will return code 0 and message txhash.
-	return &walletrpc.SendResponse{
+	r := &walletrpc.SendResponse{
 		ErrorCode:    int32(errCode),
 		ErrorMessage: errMsg,
-	}, nil
+	}
+	common.Log.Tracef("  return: %+v\n", r)
+	return r, nil
 }
 
-func getTaddressBalanceZcashdRpc(addressList []string) (*walletrpc.Balance, error) {
+func getTaddressBalanceZcashdRpc(ctx context.Context, addressList []string) (*walletrpc.Balance, error) {
 	for _, addr := range addressList {
 		if err := checkTaddress(addr); err != nil {
 			return &walletrpc.Balance{}, err
@@ -355,7 +414,7 @@ func getTaddressBalanceZcashdRpc(addressList []string) (*walletrpc.Balance, erro
 	}
 	params[0] = param
 
-	result, rpcErr := common.RawRequest("getaddressbalance", params)
+	result, rpcErr := common.RawRequest(ctx, "getaddressbalance", params)
 	if rpcErr != nil {
 		return &walletrpc.Balance{}, rpcErr
 	}
@@ -369,11 +428,28 @@ func getTaddressBalanceZcashdRpc(addressList []string) (*walletrpc.Balance, erro
 
 // GetTaddressBalance returns the total balance for a list of taddrs
 func (s *lwdStreamer) GetTaddressBalance(ctx context.Context, addresses *walletrpc.AddressList) (*walletrpc.Balance, error) {
-	return getTaddressBalanceZcashdRpc(addresses.Addresses)
+	common.Log.Debugf("gRPC GetTaddressBalance(%+v)\n", addresses)
+	r, err := getTaddressBalanceZcashdRpc(ctx, addresses.Addresses)
+	if err == nil {
+		common.Log.Tracef("  return: %+v\n", r)
+	}
+	return r, err
 }
+
+// maxTaddrsPerRequest bounds the number of transparent addresses a single
+// request may cause lightwalletd to process, across the transparent-address
+// gRPC methods. Without a cap, an unauthenticated client can drive unbounded
+// memory growth and backend work: GetTaddressBalanceStream accumulates
+// streamed addresses until the process is OOM-killed, and GetAddressUtxos
+// forwards the whole list to zcashd and materializes the full result before
+// applying client-side limits. The unary GetTaddressBalance is already
+// implicitly bounded by gRPC's MaxRecvMsgSize; this gives the other methods an
+// equivalent bound, generous for any legitimate wallet (GHSA-x4m7-3gpp-xc36).
+const maxTaddrsPerRequest = 10000
 
 // GetTaddressBalanceStream returns the total balance for a list of taddrs
 func (s *lwdStreamer) GetTaddressBalanceStream(addresses walletrpc.CompactTxStreamer_GetTaddressBalanceStreamServer) error {
+	common.Log.Debugf("gRPC GetTaddressBalanceStream(%+v)\n", addresses)
 	addressList := make([]string, 0)
 	for {
 		addr, err := addresses.Recv()
@@ -383,24 +459,44 @@ func (s *lwdStreamer) GetTaddressBalanceStream(addresses walletrpc.CompactTxStre
 		if err != nil {
 			return err
 		}
+		// Validate and bound each address as it arrives, rather than
+		// accumulating unbounded, unvalidated input (GHSA-x4m7-3gpp-xc36).
+		if err := checkTaddress(addr.Address); err != nil {
+			return err
+		}
+		if len(addressList) >= maxTaddrsPerRequest {
+			return status.Errorf(codes.ResourceExhausted,
+				"GetTaddressBalanceStream: too many addresses (limit %d)", maxTaddrsPerRequest)
+		}
 		addressList = append(addressList, addr.Address)
 	}
-	balance, err := getTaddressBalanceZcashdRpc(addressList)
+	balance, err := getTaddressBalanceZcashdRpc(addresses.Context(), addressList)
 	if err != nil {
 		return err
 	}
 	addresses.SendAndClose(balance)
+	common.Log.Tracef("  return: %+v\n", balance)
 	return nil
 }
 
 func (s *lwdStreamer) GetMempoolStream(_empty *walletrpc.Empty, resp walletrpc.CompactTxStreamer_GetMempoolStreamServer) error {
-	err := common.GetMempool(func(tx *walletrpc.RawTransaction) error {
+	common.Log.Debugf("gRPC GetMempoolStream()\n")
+	err := common.GetMempool(resp.Context(), func(tx *walletrpc.RawTransaction) error {
 		return resp.Send(tx)
 	})
 	return err
 }
 
-func getAddressUtxos(arg *walletrpc.GetAddressUtxosArg, f func(*walletrpc.GetAddressUtxosReply) error) error {
+func getAddressUtxos(ctx context.Context, arg *walletrpc.GetAddressUtxosArg, f func(*walletrpc.GetAddressUtxosReply) error) error {
+	// Bound the address count before contacting zcashd: getaddressutxos cannot
+	// push down StartHeight/MaxEntries, so lightwalletd fetches and
+	// materializes the entire backend result before applying those limits.
+	// Capping the input keeps one request from forcing unbounded backend work
+	// and result materialization (GHSA-x4m7-3gpp-xc36).
+	if len(arg.Addresses) > maxTaddrsPerRequest {
+		return status.Errorf(codes.ResourceExhausted,
+			"getAddressUtxos: too many addresses (limit %d)", maxTaddrsPerRequest)
+	}
 	for _, a := range arg.Addresses {
 		if err := checkTaddress(a); err != nil {
 			return err
@@ -415,7 +511,7 @@ func getAddressUtxos(arg *walletrpc.GetAddressUtxosArg, f func(*walletrpc.GetAdd
 		return err
 	}
 	params[0] = param
-	result, rpcErr := common.RawRequest("getaddressutxos", params)
+	result, rpcErr := common.RawRequest(ctx, "getaddressutxos", params)
 	if rpcErr != nil {
 		return rpcErr
 	}
@@ -457,19 +553,23 @@ func getAddressUtxos(arg *walletrpc.GetAddressUtxosArg, f func(*walletrpc.GetAdd
 }
 
 func (s *lwdStreamer) GetAddressUtxos(ctx context.Context, arg *walletrpc.GetAddressUtxosArg) (*walletrpc.GetAddressUtxosReplyList, error) {
+	common.Log.Debugf("gRPC GetAddressUtxos(%+v)\n", arg)
 	addressUtxos := make([]*walletrpc.GetAddressUtxosReply, 0)
-	err := getAddressUtxos(arg, func(utxo *walletrpc.GetAddressUtxosReply) error {
+	err := getAddressUtxos(ctx, arg, func(utxo *walletrpc.GetAddressUtxosReply) error {
 		addressUtxos = append(addressUtxos, utxo)
 		return nil
 	})
 	if err != nil {
 		return &walletrpc.GetAddressUtxosReplyList{}, err
 	}
-	return &walletrpc.GetAddressUtxosReplyList{AddressUtxos: addressUtxos}, nil
+	r := &walletrpc.GetAddressUtxosReplyList{AddressUtxos: addressUtxos}
+	common.Log.Tracef("  return: %+v\n", r)
+	return r, nil
 }
 
 func (s *lwdStreamer) GetAddressUtxosStream(arg *walletrpc.GetAddressUtxosArg, resp walletrpc.CompactTxStreamer_GetAddressUtxosStreamServer) error {
-	err := getAddressUtxos(arg, func(utxo *walletrpc.GetAddressUtxosReply) error {
+	common.Log.Debugf("gRPC GetAddressUtxosStream(%+v)\n", arg)
+	err := getAddressUtxos(resp.Context(), arg, func(utxo *walletrpc.GetAddressUtxosReply) error {
 		return resp.Send(utxo)
 	})
 	if err != nil {

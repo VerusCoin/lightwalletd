@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,8 @@ func TestParseNBits(t *testing.T) {
 	}
 }
 
+const posNonceVerusV2 = 0x00010004
+
 func TestBlockHeader(t *testing.T) {
 	testBlocks, err := os.Open("../testdata/blocks")
 	if err != nil {
@@ -84,7 +87,7 @@ func TestBlockHeader(t *testing.T) {
 		}
 
 		// Some basic sanity checks
-		if blockHeader.Version != 4 {
+		if blockHeader.Version != posNonceVerusV2 {
 			t.Error("Read wrong version in a test block.")
 			break
 		}
@@ -133,12 +136,6 @@ func TestBlockHeader(t *testing.T) {
 			t.Error("caching is broken")
 		}
 
-		// This is not necessarily true for anything but our current test cases.
-		for _, b := range hash[:4] {
-			if b != 0 {
-				t.Errorf("Hash lacked leading zeros: %x", hash)
-			}
-		}
 		if prevHash != nil && !bytes.Equal(blockHeader.GetDisplayPrevHash(), prevHash) {
 			t.Errorf("Previous hash mismatch")
 		}
@@ -178,6 +175,24 @@ func TestBadBlockHeader(t *testing.T) {
 		if err == nil {
 			t.Errorf("unexpected success parsing bad block %d", i)
 		}
+	}
+}
+
+func TestBlockHeaderRejectsSolutionLengthThatCannotFit(t *testing.T) {
+	// 140-byte block header prefix followed by solution_length=1 and no
+	// solution bytes.
+	blockData := make([]byte, 140)
+	blockData[0] = 0x04
+	blockData = append(blockData, 0x01)
+
+	blockHeader := NewBlockHeader()
+	_, err := blockHeader.ParseFromSlice(blockData)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	wantErr := "solution_length 1 exceeds remaining input length 0"
+	if !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("error mismatch:\nhave: %v\nwant substring: %s", err, wantErr)
 	}
 }
 

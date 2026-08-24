@@ -8,9 +8,9 @@ package parser
 import (
 	"crypto/sha256"
 
-	"github.com/asherda/lightwalletd/parser/internal/bytestring"
-	"github.com/asherda/lightwalletd/walletrpc"
 	"github.com/pkg/errors"
+	"github.com/veruscoin/lightwalletd/parser/internal/bytestring"
+	"github.com/veruscoin/lightwalletd/walletrpc"
 )
 
 type rawTransaction struct {
@@ -88,6 +88,10 @@ func (tx *txOut) ParseFromSlice(data []byte) ([]byte, error) {
 	}
 
 	return []byte(s), nil
+}
+
+func (tx *Transaction) isGroth16Proof() bool {
+	return tx.version >= 4
 }
 
 // spend is a Sapling Spend Description as described in 7.3 of the Zcash
@@ -356,6 +360,9 @@ func (tx *Transaction) ParseFromSlice(data []byte) ([]byte, error) {
 	if !s.ReadCompactSize(&txInCount) {
 		return nil, errors.New("could not read tx_in_count")
 	}
+	if err := rejectCountExceedingRemaining("tx_in_count", txInCount, len(s), minTxInWireBytes); err != nil {
+		return nil, err
+	}
 
 	// TODO: Duplicate/otherwise-too-many transactions are a possible DoS
 	// TODO: vector. At the moment we're assuming trusted input.
@@ -376,6 +383,9 @@ func (tx *Transaction) ParseFromSlice(data []byte) ([]byte, error) {
 	var txOutCount int
 	if !s.ReadCompactSize(&txOutCount) {
 		return nil, errors.New("could not read tx_out_count")
+	}
+	if err := rejectCountExceedingRemaining("tx_out_count", txOutCount, len(s), minTxOutWireBytes); err != nil {
+		return nil, err
 	}
 
 	if txOutCount > 0 {
@@ -410,6 +420,9 @@ func (tx *Transaction) ParseFromSlice(data []byte) ([]byte, error) {
 		if !s.ReadCompactSize(&spendCount) {
 			return nil, errors.New("could not read nShieldedSpend")
 		}
+		if err := rejectCountExceedingRemaining("nShieldedSpend", spendCount, len(s), minSaplingV4SpendBytes); err != nil {
+			return nil, err
+		}
 
 		if spendCount > 0 {
 			tx.shieldedSpends = make([]*spend, spendCount)
@@ -425,6 +438,9 @@ func (tx *Transaction) ParseFromSlice(data []byte) ([]byte, error) {
 
 		if !s.ReadCompactSize(&outputCount) {
 			return nil, errors.New("could not read nShieldedOutput")
+		}
+		if err := rejectCountExceedingRemaining("nShieldedOutput", outputCount, len(s), minSaplingV4OutputBytes); err != nil {
+			return nil, err
 		}
 
 		if outputCount > 0 {
@@ -444,6 +460,9 @@ func (tx *Transaction) ParseFromSlice(data []byte) ([]byte, error) {
 		var joinSplitCount int
 		if !s.ReadCompactSize(&joinSplitCount) {
 			return nil, errors.New("could not read nJoinSplit")
+		}
+		if err := rejectCountExceedingRemaining("nJoinSplit", joinSplitCount, len(s), minJoinSplitWireBytes(tx.isGroth16Proof())); err != nil {
+			return nil, err
 		}
 
 		if joinSplitCount > 0 {

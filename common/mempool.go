@@ -1,12 +1,12 @@
 package common
 
 import (
-	"encoding/hex"
+	"context"
 	"encoding/json"
 	"sync"
 	"time"
 
-	"github.com/asherda/lightwalletd/walletrpc"
+	"github.com/veruscoin/lightwalletd/walletrpc"
 )
 
 type txid string
@@ -35,7 +35,7 @@ var (
 	g_lock sync.Mutex
 )
 
-func GetMempool(sendToClient func(*walletrpc.RawTransaction) error) error {
+func GetMempool(ctx context.Context, sendToClient func(*walletrpc.RawTransaction) error) error {
 	g_lock.Lock()
 	index := 0
 	// Stay in this function until the tip block hash changes.
@@ -43,10 +43,18 @@ func GetMempool(sendToClient func(*walletrpc.RawTransaction) error) error {
 
 	// Wait for more transactions to be added to the list
 	for {
+		// Observe client cancel at the top of every iteration. This is
+		// load-bearing on the empty-mempool path where sendToClient is never
+		// invoked and the loop would otherwise spin until the next tip change
+		// (~75s avg on mainnet).
+		if err := ctx.Err(); err != nil {
+			g_lock.Unlock()
+			return err
+		}
 		// Don't fetch the mempool more often than every 2 seconds.
 		now := Time.Now()
 		if now.After(g_lastTime.Add(2 * time.Second)) {
-			blockChainInfo, err := getLatestBlockChainInfo()
+			blockChainInfo, err := getLatestBlockChainInfo(ctx)
 			if err != nil {
 				g_lock.Unlock()
 				return err
@@ -61,7 +69,7 @@ func GetMempool(sendToClient func(*walletrpc.RawTransaction) error) error {
 				g_lastTime = time.Time{}
 				break
 			}
-			if err = refreshMempoolTxns(); err != nil {
+			if err = refreshMempoolTxns(ctx); err != nil {
 				g_lock.Unlock()
 				return err
 			}
@@ -77,7 +85,14 @@ func GetMempool(sendToClient func(*walletrpc.RawTransaction) error) error {
 				return err
 			}
 		}
-		Time.Sleep(200 * time.Millisecond)
+		// Cancel-aware sleep: replaces the prior non-cancellable Time.Sleep so
+		// a client disconnect aborts within 200ms even when sendToClient is
+		// never invoked.
+		select {
+		case <-Time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 		g_lock.Lock()
 		if g_lastBlockChainInfo.BestBlockHash != stayHash {
 			break
@@ -88,11 +103,11 @@ func GetMempool(sendToClient func(*walletrpc.RawTransaction) error) error {
 }
 
 // RefreshMempoolTxns gets all new mempool txns and sends any new ones to waiting clients
-func refreshMempoolTxns() error {
+func refreshMempoolTxns(ctx context.Context) error {
 	Log.Infoln("Refreshing mempool")
 
 	params := []json.RawMessage{}
-	result, rpcErr := RawRequest("getrawmempool", params)
+	result, rpcErr := RawRequest(ctx, "getrawmempool", params)
 	if rpcErr != nil {
 		return rpcErr
 	}
@@ -108,42 +123,40 @@ func refreshMempoolTxns() error {
 			// We've already fetched this transaction
 			continue
 		}
-		g_txidSeen[txid(txidstr)] = struct{}{}
+
 		// We haven't fetched this transaction already.
+		g_txidSeen[txid(txidstr)] = struct{}{}
 		txidJSON, err := json.Marshal(txidstr)
 		if err != nil {
 			return err
 		}
-		// The "0" is because we only need the raw hex, which is returned as
-		// just a hex string, and not even a json string (with quotes).
-		params := []json.RawMessage{txidJSON, json.RawMessage("0")}
-		result, rpcErr := RawRequest("getrawtransaction", params)
+
+		params := []json.RawMessage{txidJSON, json.RawMessage("1")}
+		result, rpcErr := RawRequest(ctx, "getrawtransaction", params)
 		if rpcErr != nil {
 			// Not an error; mempool transactions can disappear
 			continue
 		}
-		// strip the quotes
-		var txStr string
-		err = json.Unmarshal(result, &txStr)
+
+		rawtx, err := ParseRawTransaction(result)
 		if err != nil {
 			return err
 		}
-		txBytes, err := hex.DecodeString(txStr)
-		if err != nil {
-			return err
+
+		// Skip any transaction that has been mined since the list of txids
+		// was retrieved.
+		if rawtx.Height != 0 {
+			continue
 		}
+
 		Log.Infoln("appending", txidstr)
-		newRtx := &walletrpc.RawTransaction{
-			Data:   txBytes,
-			Height: uint64(g_lastBlockChainInfo.Blocks),
-		}
-		g_txList = append(g_txList, newRtx)
+		g_txList = append(g_txList, rawtx)
 	}
 	return nil
 }
 
-func getLatestBlockChainInfo() (*ZcashdRpcReplyGetblockchaininfo, error) {
-	result, rpcErr := RawRequest("getblockchaininfo", []json.RawMessage{})
+func getLatestBlockChainInfo(ctx context.Context) (*ZcashdRpcReplyGetblockchaininfo, error) {
+	result, rpcErr := RawRequest(ctx, "getblockchaininfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}

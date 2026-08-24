@@ -8,8 +8,10 @@ package parser
 import (
 	"bytes"
 	"encoding/binary"
-	"github.com/asherda/lightwalletd/parser/internal/bytestring"
-	"github.com/asherda/lightwalletd/parser/verushash"
+	"fmt"
+
+	"github.com/veruscoin/lightwalletd/parser/internal/bytestring"
+	"github.com/veruscoin/lightwalletd/parser/verushash"
 
 	"github.com/pkg/errors"
 	"math/big"
@@ -165,8 +167,22 @@ func (hdr *BlockHeader) ParseFromSlice(in []byte) (rest []byte, err error) {
 		return in, errors.New("could not read Nonce bytes")
 	}
 
-	if !s.ReadCompactLengthPrefixed((*bytestring.String)(&hdr.Solution)) {
-		return in, errors.New("could not read CompactSize-prefixed Equihash solution")
+	{
+		var length int
+		if !s.ReadCompactSize(&length) {
+			return in, errors.New("could not read compact size of solution")
+		}
+		// Check before allocating: length is a byte count bounded only by
+		// maxCompactSize, so a truncated header could otherwise size a 32MB
+		// slice that the ReadBytes below immediately fails to fill.
+		if length > len(s) {
+			return in, fmt.Errorf("solution_length %d exceeds remaining input length %d",
+				length, len(s))
+		}
+		hdr.Solution = make([]byte, length)
+		if !s.ReadBytes(&hdr.Solution, length) {
+			return in, errors.New("could not read CompactSize-prefixed Equihash solution")
+		}
 	}
 
 	// TODO: interpret the bytes
@@ -210,7 +226,10 @@ func (hdr *BlockHeader) GetDisplayHash() []byte {
 	//digest = sha256.Sum256(digest[:])
 
 	// VerusHash
-	vh := hashHeader(serializedHeader)
+	vh := verushash.HashHeader(serializedHeader)
+	if vh == nil {
+		return nil
+	}
 	// Convert to big-endian
 	hdr.cachedHash = Reverse(vh)
 	return hdr.cachedHash
@@ -229,29 +248,10 @@ func (hdr *BlockHeader) GetEncodableHash() []byte {
 	//digest = sha256.Sum256(digest[:])
 
 	// Verushash
-	vh := hashHeader(serializedHeader)
-	return vh
+	return verushash.HashHeader(serializedHeader)
 }
 
 // GetDisplayPrevHash returns the block hash in big-endian order.
 func (hdr *BlockHeader) GetDisplayPrevHash() []byte {
 	return Reverse(hdr.HashPrevBlock)
-}
-
-func hashHeader(serializedHeader []byte) []byte {
-	length := len(serializedHeader)
-	if serializedHeader[0] == 4 && serializedHeader[2] >= 1 {
-		if length < 144 || serializedHeader[143] < 3 {
-			return verushash.VerusHash_V2B(serializedHeader)
-		} else {
-			if serializedHeader[143] < 4 {
-				return verushash.VerusHash_V2B1(serializedHeader)
-			} else {
-				//		fmt.Println(hex.EncodeToString(Reverse(verushash.VerusHash_V2B2(serializedHeader))))
-				return verushash.VerusHash_V2B2(serializedHeader)
-			}
-		}
-	} else {
-		return verushash.VerusHash(serializedHeader)
-	}
 }

@@ -12,15 +12,14 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/asherda/lightwalletd/walletrpc"
 	"github.com/golang/protobuf/proto"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
+	"github.com/veruscoin/lightwalletd/walletrpc"
 )
 
 const (
-	blockHeightPrefix = "B" // key is "B" + block height, value is block; see also H, block by hash
-	blockHashPrefix   = "H" // key is "H" + block hash, value is block; see also B, block by height
+	blockHeightPrefix = "B" // key is "B" + block height, value is block
 	idPrefix          = "I" // key is "I" + chain ID, value is height (more to come), see next (verusID)
 	saplingTreePrefix = "S" // key is "S", value is sapling tree size by height
 )
@@ -186,16 +185,6 @@ func NewBlockCache(db *leveldb.DB, chainID string, startHeight int, redownload b
 		c.flushBlocks(c.firstBlock, c.nextBlock)
 	}
 
-	for i := c.firstBlock; i < c.nextBlock; i++ {
-
-		// Check for corruption.
-		block := c.readBlock(i)
-		if block == nil {
-			Log.Warning("error, record not found reading block at height ", i, ", attempting to recover")
-			c.recoverFromCorruption(c.nextBlock)
-			break
-		}
-	}
 	Log.Info("Found ", c.nextBlock-c.firstBlock, " blocks in cache")
 	return c
 }
@@ -237,18 +226,13 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 		blockSize += uint64(len(tx.Outputs))
 	}
 
+	// newSize == prevSize + blockSize with unsigned arithmetic, so it is always
+	// >= prevSize by construction; an inter-block "decrease" is not representable
+	// here and does not need a runtime check.
 	newSize := prevSize + blockSize
 
 	block.ChainMetadata = &walletrpc.ChainMetadata{
 		SaplingCommitmentTreeSize: &newSize,
-	}
-
-	if height > c.firstBlock {
-    		prevSize := c.getSaplingTreeSize(height - 1)
-   		if newSize < prevSize {
-                        // should always increase or stay the same on inter-block basis
-        		Log.Fatal("sapling tree size decreased at height ", height)
-    		}
 	}
 
 	if err := c.storeSaplingTreeSize(height, newSize); err != nil {
@@ -267,10 +251,6 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 		Log.Fatal("hash write failed at height", height, ": ", err)
 	}
 
-	if err := c.storeNewHeight(false); err != nil {
-		Log.Fatal("height write failed at height", height, ": ", err)
-	}
-
 	if c.latestHash == nil {
 		c.latestHash = make([]byte, len(block.Hash))
 	}
@@ -278,6 +258,10 @@ func (c *BlockCache) Add(height int, block *walletrpc.CompactBlock) error {
 
 	c.nextBlock++
 	// Invariant: m[firstBlock..nextBlock) are valid.
+
+	if err := c.storeNewHeight(false); err != nil {
+		Log.Fatal("height write failed at height", height, ": ", err)
+	}
 	return nil
 }
 
@@ -300,6 +284,7 @@ func (c *BlockCache) Reorg(height int) {
 
 	// adjust to the new height
 	c.nextBlock = height
+	c.storeNewHeight(true)
 	c.setLatestHash()
 }
 
@@ -364,14 +349,6 @@ func (c *BlockCache) flushBlock(height int) {
 		Log.Warning("error flushing block (by height) at height ", height, ": ", err)
 	}
 
-	if c.latestHash != nil {
-		hashID := append([]byte(blockHashPrefix), c.latestHash...)
-		err = c.ldb.Delete(hashID, &opt.WriteOptions{Sync: false})
-		if err != nil {
-			Log.Warning("error flushing block (by hash) at height ", height, ": ", err)
-		}
-	}
-
 	treeKey := []byte(saplingTreePrefix + strconv.Itoa(height))
 	err = c.ldb.Delete(treeKey, &opt.WriteOptions{Sync: false})
 	if err != nil {
@@ -381,7 +358,7 @@ func (c *BlockCache) flushBlock(height int) {
 
 func (c *BlockCache) storeNewHeight(sync bool) error {
 	bytesHeight := make([]byte, 8)
-	binary.LittleEndian.PutUint64(bytesHeight, (uint64)(c.nextBlock&0xFFFFFFFFFFFFFFF))
+	binary.LittleEndian.PutUint64(bytesHeight, uint64(c.nextBlock))
 	return c.ldb.Put([]byte(idPrefix+c.verusID), bytesHeight, &opt.WriteOptions{Sync: sync})
 }
 
@@ -389,14 +366,6 @@ func (c *BlockCache) storeNewBlock(height int, block []byte) error {
 	err := c.ldb.Put([]byte(blockHeightPrefix+strconv.Itoa(height)), block, &opt.WriteOptions{Sync: false})
 	if err != nil {
 		Log.Fatal("blocks write at height", height, "failed: ", err)
-		return err
-	}
-	var hashID []byte = nil
-	copy(hashID, blockHashPrefix)
-	hashID = append(hashID, []byte(c.latestHash)...)
-	err = c.ldb.Put(hashID, block, &opt.WriteOptions{Sync: false})
-	if err != nil {
-		Log.Fatal("hash write at height", height, "failed: ", err)
 		return err
 	}
 	return nil

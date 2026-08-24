@@ -23,10 +23,10 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/asherda/lightwalletd/common"
-	"github.com/asherda/lightwalletd/common/logging"
-	"github.com/asherda/lightwalletd/frontend"
-	"github.com/asherda/lightwalletd/walletrpc"
+	"github.com/veruscoin/lightwalletd/common"
+	"github.com/veruscoin/lightwalletd/common/logging"
+	"github.com/veruscoin/lightwalletd/frontend"
+	"github.com/veruscoin/lightwalletd/walletrpc"
 )
 
 var cfgFile string
@@ -185,23 +185,29 @@ func startServer(opts *common.Options) error {
 	var saplingHeight int
 	var chainName string
 	var chainID string
-	var rpcClient *rpcclient.Client
+	var connCfg *rpcclient.ConnConfig
 	var err error
 	if opts.Darkside {
 		chainName = "darkside"
 	} else {
 		if opts.RPCUser != "" && opts.RPCPassword != "" && opts.RPCHost != "" && opts.RPCPort != "" {
-			rpcClient, err = frontend.NewZRPCFromFlags(opts)
+			connCfg = frontend.ConnConfigFromFlags(opts)
 		} else {
-			rpcClient, err = frontend.NewZRPCFromConf(opts.VerusConfPath)
+			connCfg, err = frontend.ConnConfigFromConf(opts.VerusConfPath)
 		}
 		if err != nil {
 			common.Log.WithFields(logrus.Fields{
 				"error": err,
 			}).Fatal("setting up RPC connection to zcashd")
 		}
+		_, err = rpcclient.New(connCfg, nil)
+		if err != nil {
+			common.Log.WithFields(logrus.Fields{
+				"error": err,
+			}).Fatal("setting up RPC connection to zebrad or zcashd")
+		}
 		// Indirect function for test mocking (so unit tests can talk to stub functions).
-		common.RawRequest = rpcClient.RawRequest
+		common.RawRequest = frontend.NewContextRawRequest(connCfg)
 
 		// Ensure that we can communicate with zcashd
 		common.FirstRPC()
@@ -384,6 +390,7 @@ func init() {
 	// Indirect functions for test mocking (so unit tests can talk to stub functions)
 	common.Time.Sleep = time.Sleep
 	common.Time.Now = time.Now
+	common.Time.After = time.After
 }
 
 // initConfig reads in config file and ENV variables if set.

@@ -5,16 +5,20 @@
 package common
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/asherda/lightwalletd/parser"
-	"github.com/asherda/lightwalletd/walletrpc"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"github.com/veruscoin/lightwalletd/parser"
+	"github.com/veruscoin/lightwalletd/walletrpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // 'make build' will overwrite this string with the output of git-describe (tag)
@@ -48,10 +52,10 @@ type Options struct {
 	DarksideTimeout     uint64 `json:"darkside_timeout"`
 }
 
-// RawRequest points to the function to send a an RPC request to zcashd;
-// in production, it points to btcsuite/btcd/rpcclient/rawrequest.go:RawRequest();
+// RawRequest points to the function to send an RPC request to zcashd;
+// in production, it points to frontend.NewContextRawRequest();
 // in unit tests it points to a function to mock RPCs to zcashd.
-var RawRequest func(method string, params []json.RawMessage) (json.RawMessage, error)
+var RawRequest func(ctx context.Context, method string, params []json.RawMessage) (json.RawMessage, error)
 
 // Time allows time-related functions to be mocked for testing,
 // so that tests can be deterministic and so they don't require
@@ -62,6 +66,7 @@ var RawRequest func(method string, params []json.RawMessage) (json.RawMessage, e
 var Time struct {
 	Sleep func(d time.Duration)
 	Now   func() time.Time
+	After func(d time.Duration) <-chan time.Time
 }
 
 // Log as a global variable simplifies logging
@@ -120,7 +125,7 @@ type (
 	// many more fields but these are the only ones we current need.
 	ZcashdRpcReplyGetrawtransaction struct {
 		Hex    string
-		Height int
+		Height int64
 	}
 
 	// zcashd rpc "getaddressbalance"
@@ -150,7 +155,7 @@ type (
 func FirstRPC() {
 	retryCount := 0
 	for {
-		result, rpcErr := RawRequest("getblockchaininfo", []json.RawMessage{})
+		result, rpcErr := RawRequest(context.Background(), "getblockchaininfo", []json.RawMessage{})
 		if rpcErr == nil {
 			if retryCount > 0 {
 				Log.Warn("getblockchaininfo RPC successful")
@@ -177,7 +182,7 @@ func FirstRPC() {
 }
 
 func GetLightdInfo() (*walletrpc.LightdInfo, error) {
-	result, rpcErr := RawRequest("getinfo", []json.RawMessage{})
+	result, rpcErr := RawRequest(context.Background(), "getinfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -187,7 +192,7 @@ func GetLightdInfo() (*walletrpc.LightdInfo, error) {
 		return nil, rpcErr
 	}
 
-	result, rpcErr = RawRequest("getblockchaininfo", []json.RawMessage{})
+	result, rpcErr = RawRequest(context.Background(), "getblockchaininfo", []json.RawMessage{})
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -224,7 +229,7 @@ func GetLightdInfo() (*walletrpc.LightdInfo, error) {
 	}, nil
 }
 
-func getBlockFromRPC(height int, cache *BlockCache) (*walletrpc.CompactBlock, error) {
+func getBlockFromRPC(ctx context.Context, height int, cache *BlockCache) (*walletrpc.CompactBlock, error) {
 	params := make([]json.RawMessage, 2)
 	heightJSON, err := json.Marshal(strconv.Itoa(height))
 	if err != nil {
@@ -232,7 +237,7 @@ func getBlockFromRPC(height int, cache *BlockCache) (*walletrpc.CompactBlock, er
 	}
 	params[0] = heightJSON
 	params[1] = json.RawMessage("0") // non-verbose (raw hex)
-	result, rpcErr := RawRequest("getblock", params)
+	result, rpcErr := RawRequest(ctx, "getblock", params)
 
 	// For some reason, the error responses are not JSON
 	if rpcErr != nil {
@@ -308,7 +313,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 		default:
 		}
 
-		result, err := RawRequest("getbestblockhash", []json.RawMessage{})
+		result, err := RawRequest(context.Background(), "getbestblockhash", []json.RawMessage{})
 		if err != nil {
 			Log.WithFields(logrus.Fields{
 				"error": err,
@@ -338,7 +343,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 			continue
 		}
 		var block *walletrpc.CompactBlock
-		block, err = getBlockFromRPC(height, c)
+		block, err = getBlockFromRPC(context.Background(), height, c)
 		if err != nil {
 			Log.Fatal("getblock ", height, " failed, will retry: ", err)
 		}
@@ -368,7 +373,7 @@ func BlockIngestor(c *BlockCache, rep int) {
 // GetBlock returns the compact block at the requested height, first by querying
 // the cache, then, if not found, will request the block from zcashd. It returns
 // nil if no block exists at this height.
-func GetBlock(cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
+func GetBlock(ctx context.Context, cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
 	// First, check the cache to see if we have the block
 	block := cache.Get(height)
 	if block != nil {
@@ -376,7 +381,7 @@ func GetBlock(cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
 	}
 
 	// Not in the cache, ask zcashd
-	block, err := getBlockFromRPC(height, cache)
+	block, err := getBlockFromRPC(ctx, height, cache)
 	//block, err := getBlockFromRPC(height)
 	if err != nil {
 		return nil, err
@@ -389,28 +394,106 @@ func GetBlock(cache *BlockCache, height int) (*walletrpc.CompactBlock, error) {
 }
 
 // GetBlockRange returns a sequence of consecutive blocks in the given range.
-func GetBlockRange(cache *BlockCache, blockOut chan<- *walletrpc.CompactBlock, errOut chan<- error, start, end int) {
+//
+// The `ctx` parameter is used to abort iteration when the gRPC client cancels
+// the stream. Without it, the producer goroutine would block indefinitely on
+// the unbuffered `blockOut` send after the consumer (the gRPC handler) returns,
+// leaking one goroutine per cancelled stream.
+func GetBlockRange(ctx context.Context, cache *BlockCache, blockOut chan<- *walletrpc.CompactBlock, errOut chan<- error, start, end int) {
 	// Go over [start, end] inclusive
 	low := start
 	high := end
-	if start > end {
+	backward := start > end
+	if backward {
 		// reverse the order
 		low, high = end, start
 	}
+	// The hash that the next block must match to prove it's adjacent to the one
+	// just sent. Going forward that's the hash of the block just sent, which
+	// the next block must name as its parent; going backward it's that block's
+	// parent, which the next block must be. Nil before the first block is sent.
+	var wantHash []byte
 	for i := low; i <= high; i++ {
 		j := i
-		if start > end {
+		if backward {
 			// reverse the order
 			j = high - (i - low)
 		}
-		block, err := GetBlock(cache, j)
+		block, err := GetBlock(ctx, cache, j)
 		if err != nil {
-			errOut <- err
+			select {
+			case errOut <- err:
+			case <-ctx.Done():
+			}
 			return
 		}
-		blockOut <- block
+		// The field of this block that has to match wantHash (see above).
+		gotHash := block.PrevHash
+		if backward {
+			gotHash = block.Hash
+		}
+		if wantHash != nil && !bytes.Equal(gotHash, wantHash) {
+			// The cache and the backend disagree about the chain, which is the
+			// state the node is in while the ingestor repairs a reorg. Fail
+			// rather than serve a sequence of blocks that can't exist.
+			select {
+			case errOut <- status.Error(codes.Aborted,
+				"GetBlockRange: chain discontinuity during reorg repair"):
+			case <-ctx.Done():
+			}
+			return
+		}
+		select {
+		case blockOut <- block:
+		case <-ctx.Done():
+			return
+		}
+		wantHash = block.Hash
+		if backward {
+			wantHash = block.PrevHash
+		}
 	}
-	errOut <- nil
+	select {
+	case errOut <- nil:
+	case <-ctx.Done():
+	}
+}
+
+// ParseRawTransaction converts between the JSON result of a `zcashd`
+// `getrawtransaction` call and the `RawTransaction` protobuf type.
+//
+// Due to an error in the original protobuf definition, it is necessary to
+// reinterpret the result of the `getrawtransaction` RPC call. Zcashd will
+// return the int64 value `-1` for the height of transactions that appear in
+// the block index, but which are not mined in the main chain. `service.proto`
+// defines the height field of `RawTransaction` to be a `uint64`, and as such
+// we must map the response from the zcashd RPC API to be representable within
+// this space. Additionally, the `height` field will be absent for transactions
+// in the mempool, resulting in the default value of `0` being set. Therefore,
+// the meanings of the `Height` field of the `RawTransaction` type are as
+// follows:
+//
+//   - height 0: the transaction is in the mempool
+//   - height 0xffffffffffffffff: the transaction has been mined on a fork that
+//     is not currently the main chain
+//   - any other height: the transaction has been mined in the main chain at the
+//     given height
+func ParseRawTransaction(message json.RawMessage) (*walletrpc.RawTransaction, error) {
+	// Many other fields are returned, but we need only these two.
+	var txinfo ZcashdRpcReplyGetrawtransaction
+	err := json.Unmarshal(message, &txinfo)
+	if err != nil {
+		return nil, err
+	}
+	txBytes, err := hex.DecodeString(txinfo.Hex)
+	if err != nil {
+		return nil, err
+	}
+
+	return &walletrpc.RawTransaction{
+		Data:   txBytes,
+		Height: uint64(txinfo.Height),
+	}, nil
 }
 
 func displayHash(hash []byte) string {
